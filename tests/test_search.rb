@@ -17,26 +17,19 @@
 # limitations under the License.
 #
 
+require "rubygems"
 require "test/unit"
 require "chef"
 
 # mocking chef such that it thinks it's running as chef-solo and knows about
 # the location of the data_bag
 Chef::Config[:solo] = true
-Chef::Config[:data_bag_path] = "tests/data/data_bags"
+Chef::Config[:data_bag_path] = "#{File.dirname(__FILE__)}/data/data_bags"
 
 # load the extension
 require File.expand_path('../../libraries/search', __FILE__)
 
-def search(*args, &block)
-  # wrapper around creating a new Recipe instance and calling search on it
-  node = Chef::Node.new()
-  cookbooks = Chef::CookbookCollection.new()
-  run_context = Chef::RunContext.new(node, cookbooks)
-  return Chef::Recipe.new("test_cookbook", "test_recipe", run_context).search(*args, &block)
-end
-
-class TestSearchDB < Test::Unit::TestCase
+module SearchDbTests
   
   def test_search_all
     # try to get data of all users
@@ -123,6 +116,17 @@ class TestSearchDB < Test::Unit::TestCase
     assert nodes.length == 2
   end
   
+  def test_any_value_lucene_range
+    nodes = search(:users, "address:[* TO *]")
+    assert nodes.length == 2
+  end
+  
+  def test_general_lucene_range_fails
+    assert_raises RuntimeError do
+      nodes = search(:users, "children:[aaa TO zzz]")
+    end
+  end
+  
   def test_block_usage
     # bracket syntax
     result = []
@@ -186,11 +190,13 @@ class TestSearchDB < Test::Unit::TestCase
   end
 end
 
-class TestSearchNode < Test::Unit::TestCase
+module SearchNodeTests
   def test_list_nodes
     nodes = search(:node)
-    assert_equal Chef::Node, nodes.first.class
-    assert_equal 2, nodes.length
+    assert_equal Chef::Node, nodes.find{ |n| n["hostname"] == "alpha.example.com" }.class
+    assert_equal Chef::Node, nodes.find{ |n| n["hostname"] == "beta.example.com" }.class
+    assert_equal Hash, nodes.find{ |n| n["hostname"] == "wjc.example.com" }.class
+    assert_equal 3, nodes.length
   end
 
   def test_search_node_with_wide_filter
@@ -207,4 +213,32 @@ class TestSearchNode < Test::Unit::TestCase
     nodes = search(:node, "hostname:beta.example.com")
     assert_equal 1, nodes.length
   end
+
+  def test_search_node_without_json_class
+    nodes = search(:node, "chef_environment:default")
+    assert_equal 3, nodes.length
+  end
 end
+
+class TestImplicitSearchDB < Test::Unit::TestCase
+  include SearchDbTests
+  include SearchNodeTests
+
+  def search(*args, &block)
+    # wrapper around creating a new Recipe instance and calling search on it
+    node = Chef::Node.new()
+    cookbooks = Chef::CookbookCollection.new()
+    run_context = Chef::RunContext.new(node, cookbooks, nil)
+    return Chef::Recipe.new("test_cookbook", "test_recipe", run_context).search(*args, &block)
+  end
+end
+
+class TestExplicitSearchDB < Test::Unit::TestCase
+  include SearchDbTests
+  include SearchNodeTests
+
+  def search(*args, &block)
+    Chef::Search::Query.new.search(*args, &block)
+  end
+end
+

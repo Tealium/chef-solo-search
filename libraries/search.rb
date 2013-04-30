@@ -3,6 +3,7 @@
 #
 # Authors:
 #       Markus Korn <markus.korn@edelight.de>
+#       Seth Chisamore <schisamo@opscode.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,85 +20,53 @@
 
 if Chef::Config[:solo]
 
-  if (defined? require_relative).nil?
-    # defenition of 'require_relative' for ruby < 1.9, found on stackoverflow.com
-    def require_relative(relative_feature)
-      c = caller.first
-      fail "Can't parse #{c}" unless c.rindex(/:\d+(:in `.*')?$/)
-      file = $`
-      if /\A\((.*)\)/ =~ file # eval, etc.
-        raise LoadError, "require_relative is called in #{$1}"
-      end
-      absolute = File.expand_path(relative_feature, File.dirname(file))
-      require absolute
-    end
+  # add currrent dir to load path
+  $: << File.dirname(__FILE__)
+
+  # All chef/solr_query/* classes were removed in Chef 11; Load vendored copy
+  # that ships with this cookbook
+  $: << File.expand_path("vendor", File.dirname(__FILE__)) if Chef::VERSION.to_i >= 11
+
+  # Ensure the treetop gem is installed and available
+  begin
+    require 'treetop'
+  rescue LoadError
+    run_context = Chef::RunContext.new(Chef::Node.new, {}, Chef::EventDispatch::Dispatcher.new)
+    chef_gem = Chef::Resource::ChefGem.new("treetop", run_context)
+    chef_gem.version('>= 1.4')
+    chef_gem.run_action(:install)
   end
 
-  require_relative 'parser.rb'
+  require 'search/overrides'
+  require 'search/parser'
+
+  module Search; class Helper; end; end
+
+  # The search and data_bag related methods moved form `Chef::Mixin::Language`
+  # to `Chef::DSL::DataQuery` in Chef 11.
+  if Chef::VERSION.to_i >= 11
+    module Chef::DSL::DataQuery
+      def self.included(base)
+        base.send(:include, Search::Overrides)
+      end
+    end
+    Search::Helper.send(:include, Chef::DSL::DataQuery)
+  else
+    module Chef::Mixin::Language
+      def self.included(base)
+        base.send(:include, Search::Overrides)
+      end
+    end
+    Search::Helper.send(:include, Chef::Mixin::Language)
+  end
 
   class Chef
-    module Mixin
-      module Language
-
-        # Overwrite the search method of recipes to operate locally by using
-        # data found in data_bags.
-        # Only very basic lucene syntax is supported and also sorting the result
-        # is not implemented, if this search method does not support a given query
-        # an exception is raised.
-        # This search() method returns a block iterator or an Array, depending
-        # on how this method is called.
-        def search(obj, query=nil, sort=nil, start=0, rows=1000, &block)
-          if !sort.nil?
-            raise "Sorting search results is not supported"
-          end
-          @_query = Query.parse(query)
-          if @_query.nil?
-            raise "Query #{query} is not supported"
-          end
-          @_result = []
-
-          case obj
-          when :node
-            search_nodes(start, rows, &block)
-          when :role
-            search_roles(start, rows, &block)
-          else
-            search_data_bag(obj, start, rows, &block)
-          end
-          
-
-          if block_given?
-            pos = 0
-            while (pos >= start and pos < (start + rows) and pos < @_result.size)
-              yield @_result[pos]
-              pos += 1
-            end
-          else
-            return @_result.slice(start, rows)
-          end
+    class Search
+      class Query
+        def initialize(*args)
         end
-
-        def search_nodes(start, rows, &block)
-          Dir.glob(File.join(Chef::Config[:data_bag_path], "node", "*.json")).map do |f|
-            # parse and hashify the node
-            node = JSON.parse(IO.read(f))
-            if @_query.match(node.to_hash)
-              @_result << node
-            end
-          end
-        end
-
-        def search_roles(start, rows, &block)
-          raise "Role searching not implemented"
-        end
-
-        def search_data_bag(bag_name, start, rows, &block)
-          data_bag(bag_name.to_s).each do |bag_item_id|
-            bag_item = data_bag_item(bag_name.to_s, bag_item_id)
-            if @_query.match(bag_item)
-              @_result << bag_item
-            end
-          end
+        def search(*args, &block)
+          ::Search::Helper.new.search(*args, &block)
         end
       end
     end
